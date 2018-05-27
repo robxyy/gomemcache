@@ -200,6 +200,8 @@ func testWithClient(t *testing.T, c *Client) {
 		t.Fatalf("increment non-number: want client error, got %v", err)
 	}
 	testTouchWithClient(t, c)
+	testGetAndTouchWithClient(t, c)
+	testGetAndTouchMultiWithClient(t, c)
 
 	// Test Delete All
 	err = c.DeleteAll()
@@ -219,11 +221,11 @@ func testTouchWithClient(t *testing.T, c *Client) {
 
 	mustSet := mustSetF(t, c)
 
-	const secondsToExpiry = int32(2)
+	const secondsToExpiry = int32(3)
 
-	// We will set foo and bar to expire in 2 seconds, then we'll keep touching
+	// We will set foo and bar to expire in 3 seconds, then we'll keep touching
 	// foo every second
-	// After 3 seconds, we expect foo to be available, and bar to be expired
+	// After 4 seconds, we expect foo to be available, and bar to be expired
 	foo := &Item{Key: "foo", Value: []byte("fooval"), Expiration: secondsToExpiry}
 	bar := &Item{Key: "bar", Value: []byte("barval"), Expiration: secondsToExpiry}
 
@@ -231,7 +233,7 @@ func testTouchWithClient(t *testing.T, c *Client) {
 	mustSet(foo)
 	mustSet(bar)
 
-	for s := 0; s < 3; s++ {
+	for s := 0; s < 4; s++ {
 		time.Sleep(time.Duration(1 * time.Second))
 		err := c.Touch(foo.Key, secondsToExpiry)
 		if nil != err {
@@ -251,6 +253,168 @@ func testTouchWithClient(t *testing.T, c *Client) {
 	_, err = c.Get("bar")
 	if nil == err {
 		t.Fatalf("item bar did not expire within %v seconds", time.Now().Sub(setTime).Seconds())
+	} else {
+		if err != ErrCacheMiss {
+			t.Fatalf("unexpected error retrieving bar: %v", err.Error())
+		}
+	}
+}
+
+func testGetAndTouchWithClient(t *testing.T, c *Client) {
+	if testing.Short() {
+		t.Log("Skipping testing memcache GetAndTouch with testing in Short mode")
+		return
+	}
+
+	mustSet := mustSetF(t, c)
+
+	const secondsToExpiry = int32(3)
+
+	// We will set foo1, foo2, bar1 and bar2 to expire in 3 seconds, then we'll keep touching
+	// foo every second
+	// After 4 seconds, we expect foo to be available, and bar to be expired
+	foo := &Item{Key: "foo", Value: []byte("fooval"), Flags: 123, Expiration: secondsToExpiry}
+	bar := &Item{Key: "bar", Value: []byte("barval"), Flags: 123, Expiration: secondsToExpiry}
+
+	setTime := time.Now()
+	mustSet(foo)
+	mustSet(bar)
+
+	for s := 0; s < 4; s++ {
+		time.Sleep(time.Duration(1 * time.Second))
+		it, err := c.GetAndTouch(foo.Key, secondsToExpiry)
+		if nil != err {
+			t.Errorf("error gat foo: %v", err.Error())
+		}
+		if it.Key != "foo" {
+			t.Errorf("gat(foo) Key = %q, want foo", it.Key)
+		}
+		if string(it.Value) != "fooval" {
+			t.Errorf("gat(foo) Value = %q, want fooval", string(it.Value))
+		}
+		if it.Flags != 123 {
+			t.Errorf("gat(foo) Flags = %v, want 123", it.Flags)
+		}
+	}
+
+	it, err := c.GetAndTouch("foo", secondsToExpiry)
+	if err != nil {
+		if err == ErrCacheMiss {
+			t.Fatalf("touching failed to keep item foo alive")
+		} else {
+			t.Fatalf("unexpected error retrieving foo after gat: %v", err.Error())
+		}
+	} else {
+		if it.Key != "foo" {
+			t.Errorf("gat(foo) Key = %q, want foo", it.Key)
+		}
+		if string(it.Value) != "fooval" {
+			t.Errorf("gat(foo) Value = %q, want fooval", string(it.Value))
+		}
+		if it.Flags != 123 {
+			t.Errorf("gat(foo) Flags = %v, want 123", it.Flags)
+		}
+	}
+
+	_, err = c.GetAndTouch("bar", secondsToExpiry)
+	if nil == err {
+		t.Fatalf("item bar did not expire within %v seconds", time.Now().Sub(setTime).Seconds())
+	} else {
+		if err != ErrCacheMiss {
+			t.Fatalf("unexpected error retrieving bar: %v", err.Error())
+		}
+	}
+}
+
+func testGetAndTouchMultiWithClient(t *testing.T, c *Client) {
+	if testing.Short() {
+		t.Log("Skipping testing memcache GetAndTouchMulti with testing in Short mode")
+		return
+	}
+
+	mustSet := mustSetF(t, c)
+
+	const secondsToExpiry = int32(3)
+
+	// We will set foo1, foo2, bar1 and bar2 to expire in 3 seconds, then we'll keep touching
+	// foo every second
+	// After 4 seconds, we expect foo to be available, and bar to be expired
+	foo1 := &Item{Key: "foo1", Value: []byte("fooval1"), Flags: 123, Expiration: secondsToExpiry}
+	foo2 := &Item{Key: "foo2", Value: []byte("fooval2"), Flags: 123, Expiration: secondsToExpiry}
+	bar1 := &Item{Key: "bar1", Value: []byte("barval1"), Flags: 123, Expiration: secondsToExpiry}
+	bar2 := &Item{Key: "bar2", Value: []byte("barval2"), Flags: 123, Expiration: secondsToExpiry}
+
+	setTime := time.Now()
+	mustSet(foo1)
+	mustSet(foo2)
+	mustSet(bar1)
+	mustSet(bar2)
+
+	for s := 0; s < 4; s++ {
+		time.Sleep(time.Duration(1 * time.Second))
+		m, err := c.GetAndTouchMulti([]string{foo1.Key, foo2.Key}, secondsToExpiry)
+		if nil != err {
+			t.Errorf("error gats foo1 and foo2: %v", err.Error())
+		}
+		if g, e := len(m), 2; g != e {
+			t.Errorf("gats: got len(map) = %d, want = %d", g, e)
+		}
+		if _, ok := m["foo1"]; !ok {
+			t.Fatalf("gats: didn't get key 'foo1'")
+		}
+		if _, ok := m["foo2"]; !ok {
+			t.Fatalf("gats: didn't get key 'foo2'")
+		}
+		if g, e := string(m["foo1"].Value), "fooval1"; g != e {
+			t.Errorf("gats: foo1: got %q, want %q", g, e)
+		}
+		if f := m["foo1"].Flags; f != 123 {
+			t.Errorf("gats: foo1: Flags = %v, want 123", f)
+		}
+		if g, e := string(m["foo2"].Value), "fooval2"; g != e {
+			t.Errorf("gats: foo2: got %q, want %q", g, e)
+		}
+		if f := m["foo2"].Flags; f != 123 {
+			t.Errorf("gats: foo2: Flags = %v, want 123", f)
+		}
+	}
+
+	m, err := c.GetAndTouchMulti([]string{"foo1", "foo2"}, secondsToExpiry)
+	if err != nil {
+		if err == ErrCacheMiss {
+			t.Fatalf("touching failed to keep item foo alive")
+		} else {
+			t.Fatalf("unexpected error retrieving foo after gats: %v", err.Error())
+		}
+	} else {
+		if g, e := len(m), 2; g != e {
+			t.Errorf("gats: got len(map) = %d, want = %d", g, e)
+		}
+		if _, ok := m["foo1"]; !ok {
+			t.Fatalf("gats: didn't get key 'foo1'")
+		}
+		if _, ok := m["foo2"]; !ok {
+			t.Fatalf("gats: didn't get key 'foo2'")
+		}
+		if g, e := string(m["foo1"].Value), "fooval1"; g != e {
+			t.Errorf("gats: foo1: got %q, want %q", g, e)
+		}
+		if f := m["foo1"].Flags; f != 123 {
+			t.Errorf("gats: foo1: Flags = %v, want 123", f)
+		}
+		if g, e := string(m["foo2"].Value), "fooval2"; g != e {
+			t.Errorf("gats: foo2: got %q, want %q", g, e)
+		}
+		if f := m["foo2"].Flags; f != 123 {
+			t.Errorf("gats: foo2: Flags = %v, want 123", f)
+		}
+	}
+
+	m, err = c.GetAndTouchMulti([]string{"bar1", "bar2"}, secondsToExpiry)
+	if nil == err {
+		if len(m) > 0 {
+			t.Fatalf("items bar1 and bar2 did not expire within %v seconds", time.Now().Sub(setTime).Seconds())
+		}
 	} else {
 		if err != ErrCacheMiss {
 			t.Fatalf("unexpected error retrieving bar: %v", err.Error())

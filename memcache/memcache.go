@@ -334,6 +334,18 @@ func (c *Client) Touch(key string, seconds int32) (err error) {
 	})
 }
 
+// GetAndTouch gets the item and updates the expiry for the given key. ErrCacheMiss is
+// returned for a memcache cache miss. The key must be at most 250 bytes in length.
+func (c *Client) GetAndTouch(key string, seconds int32) (item *Item, err error) {
+	err = c.withKeyAddr(key, func(addr net.Addr) error {
+		return c.getAndTouchFromAddr(addr, []string{key}, seconds, func(it *Item) { item = it })
+	})
+	if err == nil && item == nil {
+		err = ErrCacheMiss
+	}
+	return
+}
+
 func (c *Client) withKeyAddr(key string, fn func(net.Addr) error) (err error) {
 	if !legalKey(key) {
 		return ErrMalformedKey
@@ -424,6 +436,21 @@ func (c *Client) touchFromAddr(addr net.Addr, keys []string, expiration int32) e
 	})
 }
 
+func (c *Client) getAndTouchFromAddr(addr net.Addr, keys []string, expiration int32, cb func(*Item)) error {
+	return c.withAddrRw(addr, func(rw *bufio.ReadWriter) error {
+		if _, err := fmt.Fprintf(rw, "gats %d %s\r\n", expiration, strings.Join(keys, " ")); err != nil {
+			return err
+		}
+		if err := rw.Flush(); err != nil {
+			return err
+		}
+		if err := parseGetResponse(rw.Reader, cb); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 // GetMulti is a batch version of Get. The returned map from keys to
 // items may have fewer elements than the input slice, due to memcache
 // cache misses. Each key must be at most 250 bytes in length.
@@ -453,6 +480,47 @@ func (c *Client) GetMulti(keys []string) (map[string]*Item, error) {
 	for addr, keys := range keyMap {
 		go func(addr net.Addr, keys []string) {
 			ch <- c.getFromAddr(addr, keys, addItemToMap)
+		}(addr, keys)
+	}
+
+	var err error
+	for _ = range keyMap {
+		if ge := <-ch; ge != nil {
+			err = ge
+		}
+	}
+	return m, err
+}
+
+// GetAndTouchMulti is a batch version of GetAndTouch. The returned map from keys to
+// items may have fewer elements than the input slice, due to memcache
+// cache misses. Each key must be at most 250 bytes in length.
+// If no error is returned, the returned map will also be non-nil.
+func (c *Client) GetAndTouchMulti(keys []string, seconds int32) (map[string]*Item, error) {
+	var lk sync.Mutex
+	m := make(map[string]*Item)
+	addItemToMap := func(it *Item) {
+		lk.Lock()
+		defer lk.Unlock()
+		m[it.Key] = it
+	}
+
+	keyMap := make(map[net.Addr][]string)
+	for _, key := range keys {
+		if !legalKey(key) {
+			return nil, ErrMalformedKey
+		}
+		addr, err := c.selector.PickServer(key)
+		if err != nil {
+			return nil, err
+		}
+		keyMap[addr] = append(keyMap[addr], key)
+	}
+
+	ch := make(chan error, buffered)
+	for addr, keys := range keyMap {
+		go func(addr net.Addr, keys []string) {
+			ch <- c.getAndTouchFromAddr(addr, keys, seconds, addItemToMap)
 		}(addr, keys)
 	}
 
